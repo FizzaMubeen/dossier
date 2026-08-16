@@ -6,10 +6,17 @@
  * reloads. Because this is browser-local storage, use the
  * "Export backup" button regularly to keep a copy of your records
  * outside the browser (see README.md).
+ *
+ * Two object stores:
+ *  - "applications": one record per tracked entry (plain, or
+ *    encrypted if the passphrase lock is enabled — see crypto.js)
+ *  - "meta": small app-level settings, currently just the security
+ *    (passphrase lock) configuration
  */
 const DB_NAME = 'dossierDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE = 'applications';
+const META_STORE = 'meta';
 
 let _dbPromise = null;
 
@@ -22,6 +29,9 @@ function openDB(){
       if(!db.objectStoreNames.contains(STORE)){
         db.createObjectStore(STORE, { keyPath: 'id' });
       }
+      if(!db.objectStoreNames.contains(META_STORE)){
+        db.createObjectStore(META_STORE, { keyPath: 'key' });
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -33,8 +43,7 @@ async function dbGetAll(){
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, 'readonly');
-    const store = tx.objectStore(STORE);
-    const req = store.getAll();
+    const req = tx.objectStore(STORE).getAll();
     req.onsuccess = () => resolve(req.result || []);
     req.onerror = () => reject(req.error);
   });
@@ -70,7 +79,27 @@ async function dbClearAll(){
   });
 }
 
-/* ---- helpers for converting File/Blob <-> base64 for JSON export/import ---- */
+async function dbGetMeta(key){
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(META_STORE, 'readonly');
+    const req = tx.objectStore(META_STORE).get(key);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbSetMeta(key, value){
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(META_STORE, 'readwrite');
+    tx.objectStore(META_STORE).put({ key, ...value });
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/* ---- helpers for converting File/Blob <-> base64, used for JSON export/import ---- */
 function blobToBase64(blob){
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -86,45 +115,4 @@ function base64ToBlob(dataUrl){
   const arr = new Uint8Array(bin.length);
   for(let i=0;i<bin.length;i++) arr[i] = bin.charCodeAt(i);
   return new Blob([arr], { type: mime });
-}
-
-/* Export all records to a plain JSON-serializable object (files -> base64) */
-async function dbExportAll(){
-  const records = await dbGetAll();
-  const out = [];
-  for(const rec of records){
-    const clone = JSON.parse(JSON.stringify(rec, (k,v)=> v instanceof Blob ? undefined : v));
-    clone.attachments = [];
-    for(const att of (rec.attachments||[])){
-      clone.attachments.push({
-        id: att.id, label: att.label, filename: att.filename,
-        type: att.type, size: att.size, uploadedDate: att.uploadedDate,
-        dataUrl: att.file ? await blobToBase64(att.file) : null
-      });
-    }
-    out.push(clone);
-  }
-  return {
-    app: 'Dossier — Application & Interview Tracker',
-    exportedAt: new Date().toISOString(),
-    records: out
-  };
-}
-
-/* Import records from a previously exported JSON object. Merges by id. */
-async function dbImportAll(payload){
-  const records = (payload && payload.records) || [];
-  for(const rec of records){
-    const restored = JSON.parse(JSON.stringify(rec));
-    restored.attachments = [];
-    for(const att of (rec.attachments||[])){
-      restored.attachments.push({
-        id: att.id, label: att.label, filename: att.filename,
-        type: att.type, size: att.size, uploadedDate: att.uploadedDate,
-        file: att.dataUrl ? base64ToBlob(att.dataUrl) : null
-      });
-    }
-    await dbPut(restored);
-  }
-  return records.length;
 }

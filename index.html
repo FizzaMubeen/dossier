@@ -7,7 +7,24 @@
 <link rel="stylesheet" href="assets/css/style.css">
 </head>
 <body>
-<div class="wrap">
+
+<!-- ===== Unlock gate (only shown when a passphrase lock is enabled) ===== -->
+<div class="unlock-gate" id="unlockGate">
+  <div class="unlock-box">
+    <h1>Dossier</h1>
+    <p class="hint">This data is passphrase-protected. Enter your passphrase to unlock it.</p>
+    <div class="field">
+      <label>Passphrase</label>
+      <input type="password" id="unlock_pass" placeholder="Enter passphrase">
+    </div>
+    <button class="btn" id="unlockBtn" style="width:100%;">Unlock</button>
+    <p class="unlock-error" id="unlockError"></p>
+    <p class="hint" style="margin-top:16px;">Forgot it? There is no reset — passphrases are never stored anywhere.
+      You can only recover data from a previously exported backup file, restored on a fresh copy of this app.</p>
+  </div>
+</div>
+
+<div class="wrap" id="mainApp" style="display:none;">
   <header class="top">
     <div class="brand">
       <h1>Dossier</h1>
@@ -18,7 +35,6 @@
 
   <div class="toolbar">
     <input type="text" id="search" placeholder="Search company, position, tag…">
-    <select id="filterStatus"><option value="">All statuses</option></select>
     <select id="filterType"><option value="">All types</option></select>
     <select id="sortBy">
       <option value="recent">Sort: recently updated</option>
@@ -26,15 +42,18 @@
       <option value="deadline">Sort: deadline</option>
       <option value="company">Sort: company A–Z</option>
     </select>
+    <button class="btn secondary" id="bulkImportBtn">Bulk import</button>
     <button class="btn secondary" id="exportBtn">Export backup</button>
     <button class="btn secondary" id="importBtn">Import backup</button>
     <input type="file" id="importFile" accept="application/json" style="display:none;">
+    <button class="btn secondary" id="securityBtn">🔒 Security</button>
     <button class="btn" id="newBtn">+ New Entry</button>
   </div>
 
   <div id="gridWrap"></div>
 </div>
 
+<!-- ===== Entry modal ===== -->
 <div class="overlay" id="overlay">
   <div class="modal">
     <div class="modal-head">
@@ -196,9 +215,89 @@
   </div>
 </div>
 
+<!-- ===== Bulk import modal ===== -->
+<div class="overlay" id="bulkOverlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Bulk Import</h2>
+      <button class="closeX" id="bulkCloseX">✕</button>
+    </div>
+    <div class="tabpanel active" style="display:block;">
+      <h4 class="sectiontitle">Spreadsheet (.xlsx or .csv)</h4>
+      <p class="hint">
+        Columns recognised (any order, case-insensitive): <b>Type, Status, Company, Position, Location,
+        Source, Applied Date, Deadline, Link, JD, Notes</b>. Unrecognised columns are ignored. Unknown
+        Status/Type values fall back to "Saved" / blank.
+      </p>
+      <div class="field-row" style="align-items:flex-end;">
+        <div class="field"><label>Spreadsheet file</label><input type="file" id="bulk_sheet_file" accept=".xlsx,.xls,.csv"></div>
+        <button class="btn secondary small" id="downloadTemplate">Download template</button>
+      </div>
+      <button class="btn small" id="importSheetBtn">Import rows</button>
+      <div class="small" id="sheetResult" style="margin-top:8px;"></div>
+
+      <hr class="divider">
+
+      <h4 class="sectiontitle">Documents (.zip)</h4>
+      <p class="hint">
+        Name each file starting with the entry's Case ID (shown on its card, e.g. <b>JT-004</b>),
+        followed by an underscore or dash and a label — e.g. <code>JT-004_CV.pdf</code>,
+        <code>JT-004_Cover-Letter.docx</code>. Matching files are attached automatically. Files that
+        don't match an existing entry are listed so you can rename and retry.
+      </p>
+      <div class="field">
+        <label>Zip file</label>
+        <input type="file" id="bulk_zip_file" accept=".zip">
+      </div>
+      <button class="btn small" id="importZipBtn">Import documents</button>
+      <div class="small" id="zipResult" style="margin-top:8px;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Security modal ===== -->
+<div class="overlay" id="securityOverlay">
+  <div class="modal" style="max-width:480px;">
+    <div class="modal-head">
+      <h2>🔒 Security</h2>
+      <button class="closeX" id="securityCloseX">✕</button>
+    </div>
+    <div class="tabpanel active" style="display:block;">
+      <p class="hint" id="securityStatus"></p>
+
+      <div id="securityEnableForm">
+        <p class="hint">Encrypts all entries and attached files at rest (AES-256) so they can't be read
+          without this passphrase — even by someone with direct access to the browser's storage files.
+          <b>There is no password reset.</b> If you forget it, the only way back is a backup exported
+          before you forget it.</p>
+        <div class="field"><label>New passphrase</label><input type="password" id="sec_pass1"></div>
+        <div class="field"><label>Confirm passphrase</label><input type="password" id="sec_pass2"></div>
+        <button class="btn" id="enableLockBtn">Enable passphrase lock</button>
+      </div>
+
+      <div id="securityManageForm" style="display:none;">
+        <h4 class="sectiontitle">Change passphrase</h4>
+        <div class="field"><label>Current passphrase</label><input type="password" id="sec_current"></div>
+        <div class="field"><label>New passphrase</label><input type="password" id="sec_new1"></div>
+        <div class="field"><label>Confirm new passphrase</label><input type="password" id="sec_new2"></div>
+        <button class="btn secondary small" id="changeLockBtn">Change passphrase</button>
+
+        <hr class="divider">
+        <h4 class="sectiontitle">Disable lock</h4>
+        <div class="field"><label>Current passphrase</label><input type="password" id="sec_disable_pass"></div>
+        <button class="btn danger small" id="disableLockBtn">Decrypt &amp; disable lock</button>
+      </div>
+      <div class="small" id="securityMsg" style="margin-top:10px;"></div>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
+<script src="assets/js/vendor/jszip.min.js"></script>
+<script src="assets/js/vendor/xlsx.full.min.js"></script>
 <script src="assets/js/db.js"></script>
+<script src="assets/js/crypto.js"></script>
 <script src="assets/js/app.js"></script>
 </body>
 </html>

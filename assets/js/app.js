@@ -1,6 +1,10 @@
 /*
  * app.js — UI logic for Dossier.
  * All fields are optional. Data persists locally via IndexedDB (db.js).
+ * If a passphrase lock is enabled (crypto.js), records are encrypted
+ * before being written to IndexedDB and decrypted into memory after
+ * unlock; the rest of this file always works with the plain, decrypted
+ * shape regardless of whether the lock is on.
  */
 const STATUS_COLORS = {
   'Saved':'var(--stamp-saved)','Applied':'var(--stamp-applied)','Screening / OA':'var(--stamp-screen)',
@@ -9,22 +13,26 @@ const STATUS_COLORS = {
 const STATUSES = Object.keys(STATUS_COLORS);
 const TYPES = ['Job','PhD Position','Postdoc','Internship','Fellowship','Other'];
 
-let apps = [];
+let apps = [];               // always the plain, decrypted, in-memory list
 let editingId = null;
 let draftMaterials = [];
 let draftInterviews = [];
 let draftContacts = [];
 let draftAttachments = [];
-let objectUrls = []; // track for revocation
+let objectUrls = [];         // tracked for revocation
+let activeStatusFilter = ''; // '' = all statuses
+
+let securityEnabled = false;
+let encryptionKey = null;    // in-memory only, never persisted
+let securityMeta = null;     // { salt, verifierIv, verifierCipher, enabled }
 
 const $ = s => document.querySelector(s);
 const el = (tag, cls, html) => { const e=document.createElement(tag); if(cls)e.className=cls; if(html!==undefined)e.innerHTML=html; return e; };
 
 function toast(msg){
   const t=$('#toast'); t.textContent=msg; t.classList.add('show');
-  clearTimeout(toast._t); toast._t=setTimeout(()=>t.classList.remove('show'),2400);
+  clearTimeout(toast._t); toast._t=setTimeout(()=>t.classList.remove('show'),2600);
 }
-
 function escapeHtml(s){
   return (s||'').replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 }
@@ -34,11 +42,52 @@ function fmtSize(bytes){
   if(bytes < 1024*1024) return (bytes/1024).toFixed(1) + ' KB';
   return (bytes/(1024*1024)).toFixed(1) + ' MB';
 }
+function extOf(filename){
+  const m = /\.([a-z0-9]+)$/i.exec(filename||'');
+  return m ? m[1].toLowerCase() : '';
+}
+const MIME_BY_EXT = {
+  pdf:'application/pdf', png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', gif:'image/gif', webp:'image/webp',
+  doc:'application/msword', docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls:'application/vnd.ms-excel', xlsx:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt:'application/vnd.ms-powerpoint', pptx:'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  txt:'text/plain', csv:'text/csv'
+};
 
-// ---------- storage ----------
+/* ============================= PERSISTENCE ============================= */
+
+async function persistApp(data){
+  if(securityEnabled && encryptionKey){
+    const rawRecord = await encryptRecord(encryptionKey, data);
+    await dbPut(rawRecord);
+  } else {
+    await dbPut(data);
+  }
+  const idx = apps.findIndex(a=>a.id===data.id);
+  if(idx>=0) apps[idx] = data; else apps.push(data);
+}
+
+async function loadAllDecrypted(){
+  const raw = await dbGetAll();
+  const out = [];
+  for(const r of raw){
+    if(r.encrypted){
+      if(!encryptionKey){ continue; } // shouldn't happen post-unlock, but guard anyway
+      try{
+        out.push(await decryptRecord(encryptionKey, r));
+      }catch(e){
+        // skip records that fail to decrypt rather than crashing the whole app
+      }
+    } else {
+      out.push(r);
+    }
+  }
+  return out;
+}
+
 async function loadApps(){
   try{
-    apps = await dbGetAll();
+    apps = await loadAllDecrypted();
   }catch(e){
     apps = [];
     toast('⚠ Could not open local storage in this browser');
@@ -46,14 +95,130 @@ async function loadApps(){
   render();
 }
 
-// ---------- init selects ----------
-function initSelects(){
-  const fs = $('#filterStatus'), ft = $('#filterType');
-  STATUSES.forEach(s=>{ const o=el('option','',s); o.value=s; fs.appendChild(o); });
-  TYPES.forEach(t=>{ const o=el('option','',t); o.value=t; ft.appendChild(o); });
+/* ============================= SECURITY / LOCK ============================= */
+
+async function initSecurity(){
+  securityMeta = await dbGetMeta('security');
+  securityEnabled = !!(securityMeta && securityMeta.enabled);
+  if(securityEnabled){
+    $('#unlockGate').classList.add('show');
+    $('#mainApp').style.display = 'none';
+  } else {
+    $('#unlockGate').classList.remove('show');
+    $('#mainApp').style.display = '';
+    await loadApps();
+  }
+  refreshSecurityPanel();
 }
 
-// ---------- render list ----------
+async function attemptUnlock(passphrase){
+  const salt = base64ToBytes(securityMeta.salt);
+  const key = await deriveKey(passphrase, salt);
+  try{
+    const check = await decryptJSON(key, { iv: securityMeta.verifierIv, cipher: securityMeta.verifierCipher });
+    if(check && check.ok === true){
+      encryptionKey = key;
+      $('#unlockGate').classList.remove('show');
+      $('#mainApp').style.display = '';
+      await loadApps();
+      return true;
+    }
+    return false;
+  }catch(e){
+    return false;
+  }
+}
+
+async function enableLock(passphrase){
+  const salt = newSalt();
+  const key = await deriveKey(passphrase, salt);
+  const verifier = await encryptJSON(key, { ok: true });
+  // re-encrypt every existing (currently plain, in-memory) record
+  for(const a of apps){
+    const rawRecord = await encryptRecord(key, a);
+    await dbPut(rawRecord);
+  }
+  const meta = {
+    enabled: true,
+    salt: bytesToBase64(salt),
+    verifierIv: verifier.iv,
+    verifierCipher: verifier.cipher
+  };
+  await dbSetMeta('security', meta);
+  securityMeta = { key:'security', ...meta };
+  securityEnabled = true;
+  encryptionKey = key;
+}
+
+async function disableLock(passphrase){
+  const salt = base64ToBytes(securityMeta.salt);
+  const key = await deriveKey(passphrase, salt);
+  const check = await decryptJSON(key, { iv: securityMeta.verifierIv, cipher: securityMeta.verifierCipher });
+  if(!check || check.ok !== true) throw new Error('bad passphrase');
+  // decrypt everything and write back as plain records
+  const raw = await dbGetAll();
+  for(const r of raw){
+    if(r.encrypted){
+      const plain = await decryptRecord(key, r);
+      await dbPut(plain);
+    }
+  }
+  await dbSetMeta('security', { enabled:false, salt:null, verifierIv:null, verifierCipher:null });
+  securityMeta = { key:'security', enabled:false };
+  securityEnabled = false;
+  encryptionKey = null;
+}
+
+async function changePassphrase(currentPass, newPass){
+  const salt = base64ToBytes(securityMeta.salt);
+  const oldKey = await deriveKey(currentPass, salt);
+  const check = await decryptJSON(oldKey, { iv: securityMeta.verifierIv, cipher: securityMeta.verifierCipher });
+  if(!check || check.ok !== true) throw new Error('bad passphrase');
+
+  const newSaltBytes = newSalt();
+  const newKey = await deriveKey(newPass, newSaltBytes);
+  const verifier = await encryptJSON(newKey, { ok: true });
+
+  const raw = await dbGetAll();
+  for(const r of raw){
+    if(r.encrypted){
+      const plain = await decryptRecord(oldKey, r);
+      const reEncrypted = await encryptRecord(newKey, plain);
+      await dbPut(reEncrypted);
+    }
+  }
+  const meta = {
+    enabled: true,
+    salt: bytesToBase64(newSaltBytes),
+    verifierIv: verifier.iv,
+    verifierCipher: verifier.cipher
+  };
+  await dbSetMeta('security', meta);
+  securityMeta = { key:'security', ...meta };
+  encryptionKey = newKey;
+}
+
+function refreshSecurityPanel(){
+  const statusEl = $('#securityStatus');
+  const enableForm = $('#securityEnableForm');
+  const manageForm = $('#securityManageForm');
+  if(securityEnabled){
+    statusEl.textContent = '🔒 Passphrase lock is ON. Your data is encrypted at rest.';
+    enableForm.style.display = 'none';
+    manageForm.style.display = 'block';
+  } else {
+    statusEl.textContent = '🔓 Passphrase lock is OFF. Data is stored in plain form in this browser.';
+    enableForm.style.display = 'block';
+    manageForm.style.display = 'none';
+  }
+}
+
+/* ============================= RENDER ============================= */
+
+function initSelects(){
+  const ft = $('#filterType');
+  TYPES.forEach(t=>{ const o=el('option','',t); o.value=t; ft.appendChild(o); });
+}
 function daysSince(dateStr){
   if(!dateStr) return null;
   const d = Math.floor((Date.now()-new Date(dateStr).getTime())/86400000);
@@ -67,7 +232,7 @@ function caseId(app){
 function render(){
   renderStats();
   renderGrid();
-  $('#subtitle').textContent = apps.length+' entr'+(apps.length===1?'y':'ies')+' tracked — stored locally in this browser';
+  $('#subtitle').textContent = apps.length+' entr'+(apps.length===1?'y':'ies')+' tracked — stored locally in this browser'+(securityEnabled? ' (encrypted)':'');
 }
 
 function renderStats(){
@@ -75,14 +240,19 @@ function renderStats(){
   const counts = {};
   STATUSES.forEach(s=>counts[s]=0);
   apps.forEach(a=>{ if(a.status) counts[a.status]=(counts[a.status]||0)+1; });
-  const show = ['Applied','Screening / OA','Interview','Offer'];
-  show.forEach(s=>{
-    const st = el('div','stat');
+
+  STATUSES.forEach(s=>{
+    const st = el('div', 'stat'+(activeStatusFilter===s? ' active':''));
     st.innerHTML = `<span class="n">${counts[s]||0}</span><span class="l">${s.split(' ')[0]}</span>`;
+    st.addEventListener('click', ()=>{
+      activeStatusFilter = (activeStatusFilter===s) ? '' : s;
+      render();
+    });
     box.appendChild(st);
   });
-  const total = el('div','stat');
-  total.innerHTML = `<span class="n">${apps.length}</span><span class="l">Total</span>`;
+  const total = el('div', 'stat'+(activeStatusFilter===''? ' active':''));
+  total.innerHTML = `<span class="n">${apps.length}</span><span class="l">All</span>`;
+  total.addEventListener('click', ()=>{ activeStatusFilter=''; render(); });
   box.appendChild(total);
 }
 
@@ -90,12 +260,11 @@ function renderGrid(){
   const wrap = $('#gridWrap');
   wrap.innerHTML='';
   const q = $('#search').value.trim().toLowerCase();
-  const fStatus = $('#filterStatus').value;
   const fType = $('#filterType').value;
   const sortBy = $('#sortBy').value;
 
   let list = apps.filter(a=>{
-    if(fStatus && a.status!==fStatus) return false;
+    if(activeStatusFilter && a.status!==activeStatusFilter) return false;
     if(fType && a.type!==fType) return false;
     if(q){
       const hay = [a.company,a.position,a.location,a.notes,a.type].join(' ').toLowerCase();
@@ -150,7 +319,8 @@ function renderGrid(){
   wrap.appendChild(grid);
 }
 
-// ---------- modal ----------
+/* ============================= ENTRY MODAL ============================= */
+
 function openModal(id){
   editingId = id || null;
   const app = id ? apps.find(a=>a.id===id) : null;
@@ -195,10 +365,10 @@ function closeModal(){
 }
 function switchTab(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.tab===name));
-  document.querySelectorAll('.tabpanel').forEach(p=>p.classList.toggle('active', p.dataset.panel===name));
+  document.querySelectorAll('.tabpanel[data-panel]').forEach(p=>p.classList.toggle('active', p.dataset.panel===name));
 }
 
-// attachments
+/* ---- attachments ---- */
 function isPreviewable(type){
   return type && (type.startsWith('image/') || type === 'application/pdf');
 }
@@ -224,9 +394,7 @@ function renderAttachments(){
       pt.addEventListener('click', ()=>{
         const slot = it.querySelector(`#preview-slot-${i}`);
         if(slot.dataset.open === '1'){
-          slot.innerHTML = '';
-          slot.dataset.open = '0';
-          pt.textContent = 'preview';
+          slot.innerHTML = ''; slot.dataset.open = '0'; pt.textContent = 'preview';
           return;
         }
         if(a.type.startsWith('image/')){
@@ -234,15 +402,14 @@ function renderAttachments(){
         } else if(a.type === 'application/pdf'){
           slot.innerHTML = `<iframe src="${link}" class="preview-pdf" title="${escapeHtml(a.label||a.filename||'')}"></iframe>`;
         }
-        slot.dataset.open = '1';
-        pt.textContent = 'hide preview';
+        slot.dataset.open = '1'; pt.textContent = 'hide preview';
       });
     }
     wrap.appendChild(it);
   });
 }
 
-// materials
+/* ---- materials ---- */
 function renderMaterials(){
   const wrap = $('#materialsList'); wrap.innerHTML='';
   draftMaterials.forEach((m,i)=>{
@@ -266,7 +433,7 @@ function renderMatChips(){
   });
 }
 
-// interviews
+/* ---- interviews ---- */
 function renderInterviews(){
   const wrap = $('#interviewsList'); wrap.innerHTML='';
   draftInterviews.forEach((iv,i)=>{
@@ -279,7 +446,7 @@ function renderInterviews(){
   });
 }
 
-// contacts
+/* ---- contacts ---- */
 function renderContacts(){
   const wrap = $('#contactsList'); wrap.innerHTML='';
   draftContacts.forEach((c,i)=>{
@@ -291,13 +458,188 @@ function renderContacts(){
   });
 }
 
-// ---------- events ----------
+/* ============================= BULK IMPORT ============================= */
+
+const SHEET_FIELD_MAP = {
+  type:'type', status:'status', company:'company', institution:'company', companyinstitution:'company', employer:'company',
+  position:'position', positiontitle:'position', role:'position', title:'position',
+  location:'location', source:'source',
+  applieddate:'appliedDate', dateapplied:'appliedDate', applied:'appliedDate',
+  deadline:'deadline', link:'link', joblink:'link', url:'link',
+  jd:'jd', jobdescription:'jd', description:'jd',
+  notes:'notes', note:'notes'
+};
+function normalizeHeader(h){
+  return String(h||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+}
+function normalizeDateValue(v){
+  if(!v) return '';
+  if(v instanceof Date && !isNaN(v)) return v.toISOString().slice(0,10);
+  const s = String(v).trim();
+  const d = new Date(s);
+  if(!isNaN(d) && /\d{4}/.test(s)) return d.toISOString().slice(0,10);
+  return s; // leave as-is if unparseable, user can fix later
+}
+
+async function importSpreadsheet(file){
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type:'array', cellDates:true });
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(sheet, { defval:'' });
+
+  let imported = 0;
+  for(const row of rows){
+    const mapped = {};
+    for(const key of Object.keys(row)){
+      const norm = normalizeHeader(key);
+      const field = SHEET_FIELD_MAP[norm];
+      if(field) mapped[field] = row[key];
+    }
+    // skip fully blank rows
+    if(Object.values(mapped).every(v => !String(v||'').trim())) continue;
+
+    const now = Date.now();
+    const status = STATUSES.find(s => s.toLowerCase() === String(mapped.status||'').trim().toLowerCase()) || 'Saved';
+    const type = TYPES.find(t => t.toLowerCase() === String(mapped.type||'').trim().toLowerCase()) || '';
+
+    const data = {
+      id: 'a'+now+Math.random().toString(36).slice(2,7),
+      created: now, updated: now,
+      type, status,
+      company: String(mapped.company||'').trim(),
+      position: String(mapped.position||'').trim(),
+      location: String(mapped.location||'').trim(),
+      source: String(mapped.source||'').trim(),
+      appliedDate: normalizeDateValue(mapped.appliedDate),
+      deadline: normalizeDateValue(mapped.deadline),
+      link: String(mapped.link||'').trim(),
+      jd: String(mapped.jd||'').trim(),
+      notes: String(mapped.notes||'').trim(),
+      materials: [], interviews: [], contacts: [], attachments: []
+    };
+    await persistApp(data);
+    imported++;
+  }
+  render();
+  return imported;
+}
+
+function downloadTemplate(){
+  const header = ['Type','Status','Company','Position','Location','Source','Applied Date','Deadline','Link','JD','Notes'];
+  const example = ['Job','Applied','Acme Robotics','ML Engineer','Berlin','LinkedIn','2026-08-01','','https://example.com/job/123','','Referred by a friend'];
+  const csv = [header, example].map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type:'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'dossier-import-template.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function importZipDocuments(file){
+  const zip = await JSZip.loadAsync(file);
+  const matched = [];
+  const unmatched = [];
+  const re = /^\s*([A-Za-z]{1,4}-\d+)[_\-\s]+(.+?)\s*$/i;
+
+  const touched = new Set();
+
+  for(const path of Object.keys(zip.files)){
+    const entry = zip.files[path];
+    if(entry.dir) continue;
+    const filename = path.split('/').pop();
+    const base = filename.replace(/\.[^.]+$/, '');
+    const m = re.exec(base);
+    if(!m){ unmatched.push(filename); continue; }
+    const caseIdStr = m[1].toUpperCase();
+    const label = m[2].replace(/[_\-]+/g,' ').trim();
+
+    const target = /^([A-Za-z]+)-(\d+)$/.exec(caseIdStr);
+    const app = target ? apps.find(a => {
+      const cm = /^([A-Za-z]+)-(\d+)$/.exec(caseId(a));
+      return cm && cm[1] === target[1] && parseInt(cm[2],10) === parseInt(target[2],10);
+    }) : null;
+    if(!app){ unmatched.push(filename + ' (no entry with case ID '+caseIdStr+')'); continue; }
+
+    const blobData = await entry.async('blob');
+    const ext = extOf(filename);
+    const mime = blobData.type || MIME_BY_EXT[ext] || 'application/octet-stream';
+    const typedBlob = blobData.type ? blobData : new Blob([blobData], { type: mime });
+
+    if(!app.attachments) app.attachments = [];
+    app.attachments.push({
+      id: 'f'+Date.now()+Math.random().toString(36).slice(2,6),
+      label: label || filename, filename, type: mime, size: typedBlob.size,
+      uploadedDate: new Date().toISOString().slice(0,10),
+      file: typedBlob
+    });
+    touched.add(app.id);
+    matched.push(filename + ' → ' + caseIdStr);
+  }
+
+  for(const id of touched){
+    const app = apps.find(a=>a.id===id);
+    app.updated = Date.now();
+    await persistApp(app);
+  }
+  render();
+  return { matched, unmatched };
+}
+
+/* ============================= EXPORT / IMPORT BACKUP ============================= */
+
+async function exportBackupJSON(){
+  const records = [];
+  for(const a of apps){
+    const clone = JSON.parse(JSON.stringify(a));
+    clone.attachments = [];
+    for(const att of (a.attachments||[])){
+      clone.attachments.push({
+        id: att.id, label: att.label, filename: att.filename, type: att.type,
+        size: att.size, uploadedDate: att.uploadedDate,
+        dataUrl: att.file ? await blobToBase64(att.file) : null
+      });
+    }
+    records.push(clone);
+  }
+  return {
+    app: 'Dossier — Application & Interview Tracker',
+    exportedAt: new Date().toISOString(),
+    encryptedInApp: securityEnabled,
+    note: 'This backup file itself is NOT encrypted. Store it somewhere secure.',
+    records
+  };
+}
+
+async function importBackupJSON(payload){
+  const records = (payload && payload.records) || [];
+  let count = 0;
+  for(const rec of records){
+    const restored = JSON.parse(JSON.stringify(rec));
+    restored.attachments = [];
+    for(const att of (rec.attachments||[])){
+      restored.attachments.push({
+        id: att.id, label: att.label, filename: att.filename, type: att.type,
+        size: att.size, uploadedDate: att.uploadedDate,
+        file: att.dataUrl ? base64ToBlob(att.dataUrl) : null
+      });
+    }
+    if(!restored.id) restored.id = 'a'+Date.now()+Math.random().toString(36).slice(2,7);
+    if(!restored.created) restored.created = Date.now();
+    restored.updated = Date.now();
+    await persistApp(restored);
+    count++;
+  }
+  return count;
+}
+
+/* ============================= EVENTS ============================= */
+
 function bindEvents(){
   $('#newBtn').addEventListener('click', ()=>openModal(null));
   $('#closeX').addEventListener('click', closeModal);
   $('#cancelBtn').addEventListener('click', closeModal);
   $('#overlay').addEventListener('click', e=>{ if(e.target.id==='overlay') closeModal(); });
-
   document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click', ()=>switchTab(t.dataset.tab)));
 
   $('#addAttachment').addEventListener('click', ()=>{
@@ -307,9 +649,8 @@ function bindEvents(){
     const label = $('#att_label').value.trim() || file.name;
     draftAttachments.push({
       id: 'f'+Date.now()+Math.random().toString(36).slice(2,6),
-      label, filename: file.name, type: file.type, size: file.size,
-      uploadedDate: new Date().toISOString().slice(0,10),
-      file
+      label, filename: file.name, type: file.type || (MIME_BY_EXT[extOf(file.name)]||'application/octet-stream'),
+      size: file.size, uploadedDate: new Date().toISOString().slice(0,10), file
     });
     $('#att_label').value=''; fileInput.value='';
     renderAttachments();
@@ -367,13 +708,7 @@ function bindEvents(){
       attachments: draftAttachments
     };
     try{
-      await dbPut(data);
-      if(editingId){
-        const idx = apps.findIndex(a=>a.id===editingId);
-        apps[idx] = data;
-      } else {
-        apps.push(data);
-      }
+      await persistApp(data);
       closeModal();
       render();
       toast('Entry saved');
@@ -393,16 +728,15 @@ function bindEvents(){
   });
 
   ['search'].forEach(id=> $('#'+id).addEventListener('input', render));
-  ['filterStatus','filterType','sortBy'].forEach(id=> $('#'+id).addEventListener('change', render));
+  ['filterType','sortBy'].forEach(id=> $('#'+id).addEventListener('change', render));
 
   $('#exportBtn').addEventListener('click', async ()=>{
     try{
-      const payload = await dbExportAll();
+      const payload = await exportBackupJSON();
       const blob = new Blob([JSON.stringify(payload)], {type:'application/json'});
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url;
-      a.download = 'dossier-backup-'+new Date().toISOString().slice(0,10)+'.json';
+      a.href = url; a.download = 'dossier-backup-'+new Date().toISOString().slice(0,10)+'.json';
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
       toast('Backup downloaded');
@@ -418,17 +752,121 @@ function bindEvents(){
     try{
       const text = await file.text();
       const payload = JSON.parse(text);
-      const count = await dbImportAll(payload);
-      await loadApps();
+      const count = await importBackupJSON(payload);
+      render();
       toast('Imported '+count+' entr'+(count===1?'y':'ies'));
     }catch(err){
       toast('⚠ Could not read that backup file');
     }
     e.target.value = '';
   });
+
+  /* ---- bulk import modal ---- */
+  $('#bulkImportBtn').addEventListener('click', ()=>{
+    $('#sheetResult').textContent=''; $('#zipResult').textContent='';
+    $('#bulkOverlay').classList.add('show');
+  });
+  $('#bulkCloseX').addEventListener('click', ()=> $('#bulkOverlay').classList.remove('show'));
+  $('#bulkOverlay').addEventListener('click', e=>{ if(e.target.id==='bulkOverlay') $('#bulkOverlay').classList.remove('show'); });
+  $('#downloadTemplate').addEventListener('click', downloadTemplate);
+
+  $('#importSheetBtn').addEventListener('click', async ()=>{
+    const file = $('#bulk_sheet_file').files[0];
+    if(!file){ toast('Choose a spreadsheet file first'); return; }
+    $('#sheetResult').textContent = 'Importing…';
+    try{
+      const count = await importSpreadsheet(file);
+      $('#sheetResult').textContent = `Imported ${count} row${count===1?'':'s'}.`;
+      toast('Spreadsheet imported');
+    }catch(e){
+      $('#sheetResult').textContent = '⚠ Could not read that file. Make sure it is a valid .xlsx or .csv.';
+    }
+  });
+
+  $('#importZipBtn').addEventListener('click', async ()=>{
+    const file = $('#bulk_zip_file').files[0];
+    if(!file){ toast('Choose a zip file first'); return; }
+    $('#zipResult').textContent = 'Importing…';
+    try{
+      const { matched, unmatched } = await importZipDocuments(file);
+      let msg = `Attached ${matched.length} file${matched.length===1?'':'s'}.`;
+      if(unmatched.length) msg += ` ${unmatched.length} unmatched: ${unmatched.join('; ')}`;
+      $('#zipResult').textContent = msg;
+      toast('Documents imported');
+    }catch(e){
+      $('#zipResult').textContent = '⚠ Could not read that zip file.';
+    }
+  });
+
+  /* ---- security modal ---- */
+  $('#securityBtn').addEventListener('click', ()=>{
+    $('#securityMsg').textContent='';
+    refreshSecurityPanel();
+    $('#securityOverlay').classList.add('show');
+  });
+  $('#securityCloseX').addEventListener('click', ()=> $('#securityOverlay').classList.remove('show'));
+  $('#securityOverlay').addEventListener('click', e=>{ if(e.target.id==='securityOverlay') $('#securityOverlay').classList.remove('show'); });
+
+  $('#enableLockBtn').addEventListener('click', async ()=>{
+    const p1 = $('#sec_pass1').value, p2 = $('#sec_pass2').value;
+    if(!p1 || p1.length<4){ $('#securityMsg').textContent='Choose a passphrase of at least 4 characters.'; return; }
+    if(p1!==p2){ $('#securityMsg').textContent='Passphrases do not match.'; return; }
+    $('#securityMsg').textContent = 'Encrypting…';
+    try{
+      await enableLock(p1);
+      $('#sec_pass1').value=''; $('#sec_pass2').value='';
+      refreshSecurityPanel();
+      $('#securityMsg').textContent = 'Passphrase lock enabled. All entries are now encrypted at rest.';
+      toast('Lock enabled');
+    }catch(e){
+      $('#securityMsg').textContent = '⚠ Could not enable the lock.';
+    }
+  });
+
+  $('#changeLockBtn').addEventListener('click', async ()=>{
+    const cur = $('#sec_current').value, n1 = $('#sec_new1').value, n2 = $('#sec_new2').value;
+    if(!n1 || n1.length<4){ $('#securityMsg').textContent='Choose a new passphrase of at least 4 characters.'; return; }
+    if(n1!==n2){ $('#securityMsg').textContent='New passphrases do not match.'; return; }
+    try{
+      await changePassphrase(cur, n1);
+      $('#sec_current').value=''; $('#sec_new1').value=''; $('#sec_new2').value='';
+      $('#securityMsg').textContent = 'Passphrase changed.';
+      toast('Passphrase changed');
+    }catch(e){
+      $('#securityMsg').textContent = '⚠ Current passphrase is incorrect.';
+    }
+  });
+
+  $('#disableLockBtn').addEventListener('click', async ()=>{
+    const pass = $('#sec_disable_pass').value;
+    if(!confirm('Disable the passphrase lock? Data will be stored in plain form in this browser.')) return;
+    try{
+      await disableLock(pass);
+      $('#sec_disable_pass').value='';
+      refreshSecurityPanel();
+      $('#securityMsg').textContent = 'Lock disabled.';
+      toast('Lock disabled');
+    }catch(e){
+      $('#securityMsg').textContent = '⚠ Passphrase is incorrect.';
+    }
+  });
+
+  /* ---- unlock gate ---- */
+  $('#unlockBtn').addEventListener('click', doUnlock);
+  $('#unlock_pass').addEventListener('keydown', e=>{ if(e.key==='Enter') doUnlock(); });
+  async function doUnlock(){
+    const pass = $('#unlock_pass').value;
+    $('#unlockError').textContent = '';
+    const ok = await attemptUnlock(pass);
+    if(!ok){
+      $('#unlockError').textContent = 'Incorrect passphrase.';
+    } else {
+      $('#unlock_pass').value = '';
+    }
+  }
 }
 
-// ---------- boot ----------
+/* ============================= BOOT ============================= */
 initSelects();
 bindEvents();
-loadApps();
+initSecurity();
