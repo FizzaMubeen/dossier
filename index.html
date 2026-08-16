@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dossier — Application &amp; Interview Tracker</title>
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <h1>Dossier</h1>
+      <p id="subtitle">application &amp; interview tracker — loading…</p>
+    </div>
+    <div class="stats" id="stats"></div>
+  </header>
+
+  <div class="toolbar">
+    <input type="text" id="search" placeholder="Search company, position, tag…">
+    <select id="filterStatus"><option value="">All statuses</option></select>
+    <select id="filterType"><option value="">All types</option></select>
+    <select id="sortBy">
+      <option value="recent">Sort: recently updated</option>
+      <option value="applied">Sort: application date</option>
+      <option value="deadline">Sort: deadline</option>
+      <option value="company">Sort: company A–Z</option>
+    </select>
+    <button class="btn secondary" id="exportBtn">Export backup</button>
+    <button class="btn secondary" id="importBtn">Import backup</button>
+    <input type="file" id="importFile" accept="application/json" style="display:none;">
+    <button class="btn" id="newBtn">+ New Entry</button>
+  </div>
+
+  <div id="gridWrap"></div>
+</div>
+
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h2 id="modalTitle">New Entry</h2>
+      <button class="closeX" id="closeX">✕</button>
+    </div>
+    <div class="tabs">
+      <div class="tab active" data-tab="overview">Overview</div>
+      <div class="tab" data-tab="attachments">Attachments</div>
+      <div class="tab" data-tab="materials">Materials Shared</div>
+      <div class="tab" data-tab="interviews">Interviews</div>
+      <div class="tab" data-tab="notes">Notes &amp; Contacts</div>
+    </div>
+
+    <div class="tabpanel active" data-panel="overview">
+      <p class="hint">Nothing here is required — fill in whatever you know now and come back later.</p>
+      <div class="field-row">
+        <div class="field">
+          <label>Type</label>
+          <select id="f_type">
+            <option value="">—</option>
+            <option>Job</option>
+            <option>PhD Position</option>
+            <option>Postdoc</option>
+            <option>Internship</option>
+            <option>Fellowship</option>
+            <option>Other</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Status</label>
+          <select id="f_status">
+            <option>Saved</option>
+            <option>Applied</option>
+            <option>Screening / OA</option>
+            <option>Interview</option>
+            <option>Offer</option>
+            <option>Rejected</option>
+            <option>Withdrawn</option>
+          </select>
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>Company / Institution</label>
+          <input type="text" id="f_company" placeholder="e.g. Acme Robotics / MIT">
+        </div>
+        <div class="field">
+          <label>Position title</label>
+          <input type="text" id="f_position" placeholder="e.g. ML Engineer / PhD in Computer Vision">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>Location</label>
+          <input type="text" id="f_location" placeholder="e.g. Berlin / Remote">
+        </div>
+        <div class="field">
+          <label>Source</label>
+          <input type="text" id="f_source" placeholder="e.g. LinkedIn, referral, university page">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>Applied date</label>
+          <input type="date" id="f_applieddate">
+        </div>
+        <div class="field">
+          <label>Deadline (if any)</label>
+          <input type="date" id="f_deadline">
+        </div>
+      </div>
+      <div class="field">
+        <label>Job post link</label>
+        <input type="text" id="f_link" placeholder="https://…">
+      </div>
+      <div class="field">
+        <label>Job description (optional — paste text as well as, or instead of, an attached file)</label>
+        <textarea id="f_jd" placeholder="Paste the JD or key requirements…"></textarea>
+      </div>
+    </div>
+
+    <div class="tabpanel" data-panel="attachments">
+      <p class="hint">Upload the actual files: CV, cover letter, JD PDF, offer letter, transcripts — anything. Stored in this browser only, so use "Export backup" regularly to keep a copy elsewhere.</p>
+      <div id="attachmentsList"></div>
+      <div class="field-row" style="align-items:flex-end;">
+        <div class="field"><label>Label</label><input type="text" id="att_label" placeholder="e.g. CV v3, Cover letter, JD PDF"></div>
+        <div class="field"><label>File</label><input type="file" id="att_file"></div>
+      </div>
+      <button class="btn secondary small" id="addAttachment">+ Add attachment</button>
+    </div>
+
+    <div class="tabpanel" data-panel="materials">
+      <p class="hint">Log which document <em>version</em> you sent, even without attaching the file — useful if you keep the actual files elsewhere.</p>
+      <div id="materialsList"></div>
+      <div class="field-row" style="align-items:flex-end;">
+        <div class="field"><label>Item</label><input type="text" id="mat_item" placeholder="e.g. CV, Cover letter, Transcript"></div>
+        <div class="field"><label>Version / detail</label><input type="text" id="mat_version" placeholder="e.g. v3 – research-focused"></div>
+        <div class="field"><label>Date shared</label><input type="date" id="mat_date"></div>
+      </div>
+      <button class="btn secondary small" id="addMaterial">+ Add material</button>
+    </div>
+
+    <div class="tabpanel" data-panel="interviews">
+      <div id="interviewsList"></div>
+      <div class="field-row">
+        <div class="field"><label>Round label</label><input type="text" id="iv_round" placeholder="e.g. Round 1 – phone screen"></div>
+        <div class="field"><label>Date</label><input type="date" id="iv_date"></div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>Format</label>
+          <select id="iv_type">
+            <option>Phone</option><option>Video</option><option>Onsite</option>
+            <option>Technical</option><option>Panel</option><option>Take-home</option><option>Other</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Outcome</label>
+          <select id="iv_outcome">
+            <option>Pending</option><option>Passed</option><option>Failed</option><option>Cancelled</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>Materials shared this round</label>
+        <div class="chiprow" id="iv_matchips"></div>
+      </div>
+      <div class="field">
+        <label>Notes (questions asked, interviewers, follow-ups)</label>
+        <textarea id="iv_notes"></textarea>
+      </div>
+      <button class="btn secondary small" id="addInterview">+ Add interview round</button>
+    </div>
+
+    <div class="tabpanel" data-panel="notes">
+      <div id="contactsList"></div>
+      <div class="field-row" style="align-items:flex-end;">
+        <div class="field"><label>Contact name</label><input type="text" id="c_name"></div>
+        <div class="field"><label>Role</label><input type="text" id="c_role" placeholder="e.g. Recruiter, PI"></div>
+        <div class="field"><label>Email</label><input type="text" id="c_email"></div>
+      </div>
+      <button class="btn secondary small" id="addContact">+ Add contact</button>
+      <div class="field" style="margin-top:16px;">
+        <label>General notes</label>
+        <textarea id="f_notes" style="min-height:90px;"></textarea>
+      </div>
+    </div>
+
+    <div class="modal-foot">
+      <div>
+        <button class="btn danger" id="deleteBtn" style="display:none;">Delete entry</button>
+      </div>
+      <div class="footR">
+        <button class="btn ghost" id="cancelBtn">Cancel</button>
+        <button class="btn" id="saveBtn">Save entry</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="assets/js/db.js"></script>
+<script src="assets/js/app.js"></script>
+</body>
+</html>
