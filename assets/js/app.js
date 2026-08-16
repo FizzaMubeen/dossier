@@ -199,6 +199,9 @@ function switchTab(name){
 }
 
 // attachments
+function isPreviewable(type){
+  return type && (type.startsWith('image/') || type === 'application/pdf');
+}
 function renderAttachments(){
   const wrap = $('#attachmentsList'); wrap.innerHTML='';
   draftAttachments.forEach((a,i)=>{
@@ -208,9 +211,33 @@ function renderAttachments(){
       link = URL.createObjectURL(a.file);
       objectUrls.push(link);
     }
+    const previewable = a.file && isPreviewable(a.type);
     it.innerHTML = `<div class="top"><b>${escapeHtml(a.label||a.filename||'Attachment')}</b><button class="remove-link" data-i="${i}">remove</button></div>
-      <div class="small">${escapeHtml(a.filename||'')} ${a.size? '· '+fmtSize(a.size):''} ${a.uploadedDate? '· '+a.uploadedDate:''} ${a.file? `· <a href="${link}" target="_blank" rel="noopener">open</a>`:''}</div>`;
+      <div class="small">${escapeHtml(a.filename||'')} ${a.size? '· '+fmtSize(a.size):''} ${a.uploadedDate? '· '+a.uploadedDate:''}
+        ${a.file? `· <a href="${link}" target="_blank" rel="noopener">open</a>` : ''}
+        ${previewable? `· <button class="preview-toggle" data-i="${i}">preview</button>` : ''}
+      </div>
+      <div class="preview-slot" id="preview-slot-${i}"></div>`;
     it.querySelector('.remove-link').addEventListener('click', ()=>{ draftAttachments.splice(i,1); renderAttachments(); });
+    const pt = it.querySelector('.preview-toggle');
+    if(pt){
+      pt.addEventListener('click', ()=>{
+        const slot = it.querySelector(`#preview-slot-${i}`);
+        if(slot.dataset.open === '1'){
+          slot.innerHTML = '';
+          slot.dataset.open = '0';
+          pt.textContent = 'preview';
+          return;
+        }
+        if(a.type.startsWith('image/')){
+          slot.innerHTML = `<img src="${link}" alt="${escapeHtml(a.label||a.filename||'')}" class="preview-img">`;
+        } else if(a.type === 'application/pdf'){
+          slot.innerHTML = `<iframe src="${link}" class="preview-pdf" title="${escapeHtml(a.label||a.filename||'')}"></iframe>`;
+        }
+        slot.dataset.open = '1';
+        pt.textContent = 'hide preview';
+      });
+    }
     wrap.appendChild(it);
   });
 }

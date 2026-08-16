@@ -151,6 +151,12 @@ header.top{
 .list-item .small a{color:var(--stamp-screen);text-decoration:none;}
 .list-item .small a:hover{text-decoration:underline;}
 .remove-link{background:none;border:none;color:var(--stamp-rejected);cursor:pointer;font-size:11px;padding:0;}
+.preview-toggle{background:none;border:none;color:var(--stamp-screen);cursor:pointer;font-size:11.5px;padding:0;font-family:'Inter',sans-serif;}
+.preview-toggle:hover{text-decoration:underline;}
+.preview-slot:empty{margin:0;}
+.preview-slot{margin-top:8px;}
+.preview-img{max-width:100%;max-height:320px;border-radius:var(--radius);border:1px solid var(--ink-600);display:block;}
+.preview-pdf{width:100%;height:360px;border:1px solid var(--ink-600);border-radius:var(--radius);background:#fff;}
 
 .chiprow{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;}
 .chipcheck{
