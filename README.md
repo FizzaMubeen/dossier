@@ -113,22 +113,57 @@ Download or clone this repository, then open `index.html` in a modern browser
 This is a static site (HTML/CSS/JS, no backend). You can host it on Netlify, Vercel,
 Cloudflare Pages, or any static file host by pointing it at this folder.
 
-## Where your data lives
+## Where your data lives, and how long it lasts
 
 All data — including uploaded files — is stored locally in your browser using
-**IndexedDB**. Nothing is sent to a server. This means:
+**IndexedDB**. Nothing is sent to a server.
 
-- Your data stays private to the device and browser you use.
-- Data is tied to the specific browser + domain combination. Opening the app from a
-  different browser, in private/incognito mode, or from a different URL (e.g. locally
-  vs. on GitHub Pages) will show a separate, empty dataset.
-- Clearing your browser's site data will delete your entries.
+**Capacity:** browsers typically grant a site many gigabytes of IndexedDB storage
+(often a large share of free disk space). Hundreds of entries with attached PDFs will
+usually total in the tens to low hundreds of MB — well within normal limits. The app
+shows a live storage usage estimate under the header so you can keep an eye on it, and
+requests "persistent" storage from the browser on load, which reduces (but does not
+eliminate) the chance of automatic cleanup under disk pressure.
 
-**Because of this, treat "Export backup" as your real record.** Click it regularly
-(the app suggests this in the Attachments tab) to download a single JSON file
-containing every entry and every attached file. Keep that file somewhere durable —
-a synced folder, a private repository, cloud storage. Use "Import backup" to restore
-it, on this device or any other.
+**Retention — read this carefully:** browser storage is a working copy, not a permanent
+archive. It survives normal use, but can be cleared by:
+- Clearing "cookies and site data" / "all browsing data" in browser settings
+- Opening the app in a different browser, device, or profile (each is a separate,
+  empty dataset — see below)
+- Uninstalling/reinstalling the browser, or reinstalling the OS
+- Browsers automatically evicting storage under severe disk-space pressure
+- Private/incognito windows, which never persist data after closing
+
+None of these are everyday occurrences, but treat **"Export backup" as your real
+record**, not a nice-to-have. The app will show a reminder banner if it's been more
+than two weeks since your last export (or if you've never exported one).
+
+## Backups: two formats
+
+**Export backup (JSON)** — the full-fidelity option. One `.json` file containing every
+field, every interview round, every contact, and every attached file. Restore it exactly
+via **Import backup**. This is the one to trust for a complete restore, and the one that
+clears the "haven't backed up" reminder banner.
+
+**Export Excel + files (.zip)** — a more portable, human-readable option. Produces a
+`.zip` containing:
+- `dossier-applications.xlsx` — one row per entry (Case ID, Type, Status, Company,
+  Position, dates, links, notes, plus flattened text summaries of materials shared,
+  interviews, and contacts), viewable in Excel, Google Sheets, Numbers, etc.
+- `attachments/` — every uploaded file, renamed `<CaseID>_<Label>.<ext>` (e.g.
+  `JT-004_CV.pdf`), so it's obvious which entry each document belongs to even outside
+  the app.
+
+Useful for sharing your tracker with someone else, archiving outside any particular
+tool, or just eyeballing everything in a spreadsheet. It can be partially re-imported:
+the spreadsheet via **Bulk import → Spreadsheet**, and the files via **Bulk import →
+Documents (.zip)** (point it at this same zip, or just the `attachments/` folder
+re-zipped — matching is done by the Case ID in each filename). Materials/interviews/
+contacts are flattened to text in this format and won't restore as structured data
+through bulk import — use the JSON backup for a full restore of those.
+
+**Neither backup format is encrypted**, regardless of whether the in-app passphrase
+lock is on — they're meant to be portable. Store them somewhere already secure.
 
 ## Pushing this project to GitHub
 

@@ -46,6 +46,9 @@ function extOf(filename){
   const m = /\.([a-z0-9]+)$/i.exec(filename||'');
   return m ? m[1].toLowerCase() : '';
 }
+function slugify(s){
+  return String(s||'file').trim().replace(/[^\w.\- ]+/g,'').replace(/\s+/g,'-').replace(/-+/g,'-') || 'file';
+}
 const MIME_BY_EXT = {
   pdf:'application/pdf', png:'image/png', jpg:'image/jpeg', jpeg:'image/jpeg', gif:'image/gif', webp:'image/webp',
   doc:'application/msword', docx:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -233,6 +236,62 @@ function render(){
   renderStats();
   renderGrid();
   $('#subtitle').textContent = apps.length+' entr'+(apps.length===1?'y':'ies')+' tracked — stored locally in this browser'+(securityEnabled? ' (encrypted)':'');
+  refreshStorageEstimate();
+  refreshBackupBanner();
+}
+
+/* ---- storage capacity + backup reminder ---- */
+async function requestPersistentStorage(){
+  try{
+    if(navigator.storage && navigator.storage.persist){
+      await navigator.storage.persist();
+    }
+  }catch(e){ /* not critical — best-effort only */ }
+}
+
+async function refreshStorageEstimate(){
+  const box = $('#storageInfo');
+  if(!box) return;
+  if(!(navigator.storage && navigator.storage.estimate)){
+    box.textContent = '';
+    return;
+  }
+  try{
+    const { usage, quota } = await navigator.storage.estimate();
+    if(!quota){ box.textContent = ''; return; }
+    const usedMB = usage/(1024*1024);
+    const quotaMB = quota/(1024*1024);
+    const usedStr = usedMB > 1024 ? (usedMB/1024).toFixed(2)+' GB' : usedMB.toFixed(1)+' MB';
+    const quotaStr = quotaMB > 1024 ? (quotaMB/1024).toFixed(1)+' GB' : quotaMB.toFixed(0)+' MB';
+    const pct = (usage/quota*100);
+    box.textContent = `Local storage: ${usedStr} used of ~${quotaStr} available in this browser (${pct.toFixed(1)}%)`;
+    box.classList.toggle('warn', pct > 75);
+  }catch(e){
+    box.textContent = '';
+  }
+}
+
+async function refreshBackupBanner(){
+  const banner = $('#backupBanner');
+  if(!banner) return;
+  banner.innerHTML = '';
+  if(apps.length === 0) return;
+  let meta = null;
+  try{ meta = await dbGetMeta('lastExport'); }catch(e){}
+  const last = meta ? meta.timestamp : null;
+  const daysSince = last ? Math.floor((Date.now()-last)/86400000) : null;
+  const shouldRemind = !last || daysSince >= 14;
+  if(!shouldRemind) return;
+
+  const msg = last
+    ? `It's been ${daysSince} day${daysSince===1?'':'s'} since your last backup export.`
+    : `You haven't exported a backup yet.`;
+  const b = el('div','backup-banner');
+  b.innerHTML = `<span>💾 ${msg} Browser storage isn't a permanent archive — export a copy for safekeeping.</span>`;
+  const btn = el('button','btn small'); btn.textContent = 'Export now';
+  btn.addEventListener('click', ()=> $('#exportBtn').click());
+  b.appendChild(btn);
+  banner.appendChild(b);
 }
 
 function renderStats(){
@@ -588,6 +647,75 @@ async function importZipDocuments(file){
 
 /* ============================= EXPORT / IMPORT BACKUP ============================= */
 
+async function exportExcelWithAttachments(){
+  const zip = new JSZip();
+  const usedNames = new Set();
+  const rows = [];
+
+  for(const a of apps){
+    const cid = caseId(a);
+    const attFilenames = [];
+    for(const att of (a.attachments||[])){
+      if(!att.file) continue;
+      const ext = extOf(att.filename) || (att.type && att.type.split('/')[1]) || 'bin';
+      const base = `${cid}_${slugify(att.label || att.filename || 'file')}`;
+      let name = `${base}.${ext}`, n = 2;
+      while(usedNames.has(name)){ name = `${base}-${n}.${ext}`; n++; }
+      usedNames.add(name);
+      zip.file(`attachments/${name}`, att.file);
+      attFilenames.push(name);
+    }
+    const materials = (a.materials||[]).map(m =>
+      `${m.item}${m.version? ' ('+m.version+')':''}${m.date? ' - shared '+m.date:''}`
+    ).join(' | ');
+    const interviews = (a.interviews||[]).map(iv =>
+      `${iv.round||'Round'} (${[iv.type,iv.date,iv.outcome].filter(Boolean).join(', ')})${iv.notes? ': '+iv.notes:''}`
+    ).join(' | ');
+    const contacts = (a.contacts||[]).map(c =>
+      `${c.name}${c.role? ' ('+c.role+')':''}${c.email? ' '+c.email:''}`
+    ).join('; ');
+
+    rows.push({
+      'Case ID': cid, 'Type': a.type||'', 'Status': a.status||'',
+      'Company': a.company||'', 'Position': a.position||'', 'Location': a.location||'',
+      'Source': a.source||'', 'Applied Date': a.appliedDate||'', 'Deadline': a.deadline||'',
+      'Link': a.link||'', 'JD': a.jd||'', 'Notes': a.notes||'',
+      'Materials Shared': materials, 'Interviews': interviews, 'Contacts': contacts,
+      'Attachments': attFilenames.join('; ')
+    });
+  }
+
+  const header = ['Case ID','Type','Status','Company','Position','Location','Source','Applied Date','Deadline','Link','JD','Notes','Materials Shared','Interviews','Contacts','Attachments'];
+  const ws = XLSX.utils.json_to_sheet(rows, { header });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Applications');
+  const xlsxBytes = XLSX.write(wb, { type:'array', bookType:'xlsx' });
+  zip.file('dossier-applications.xlsx', xlsxBytes);
+
+  zip.file('README.txt',
+    'This export contains:\n' +
+    '  - dossier-applications.xlsx  (one row per tracked entry — open in Excel/Sheets)\n' +
+    '  - attachments/               (every uploaded file, named <CaseID>_<Label>.<ext>)\n\n' +
+    'To bring this back into Dossier:\n' +
+    '  1. Bulk import > Spreadsheet — pick dossier-applications.xlsx to recreate the entries.\n' +
+    '  2. Bulk import > Documents (.zip) — pick this same zip file (or a zip of just the\n' +
+    '     attachments/ folder) to re-attach the files to the matching Case IDs.\n\n' +
+    'Note: Materials Shared / Interviews / Contacts are flattened into readable text columns\n' +
+    'here and will NOT restore as structured data through bulk import — only the core fields\n' +
+    'and attachments do. For a full-fidelity restore of everything, use "Export backup (JSON)"\n' +
+    'instead and restore it with "Import backup".\n\n' +
+    'This file is not encrypted, regardless of whether the in-app passphrase lock is on.\n' +
+    'Store it somewhere secure.'
+  );
+
+  const blob = await zip.generateAsync({ type:'blob' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'dossier-export-'+new Date().toISOString().slice(0,10)+'.zip';
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
 async function exportBackupJSON(){
   const records = [];
   for(const a of apps){
@@ -739,9 +867,22 @@ function bindEvents(){
       a.href = url; a.download = 'dossier-backup-'+new Date().toISOString().slice(0,10)+'.json';
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
+      await dbSetMeta('lastExport', { timestamp: Date.now() });
+      refreshBackupBanner();
       toast('Backup downloaded');
     }catch(e){
       toast('⚠ Export failed');
+    }
+  });
+
+  $('#exportExcelBtn').addEventListener('click', async ()=>{
+    try{
+      await exportExcelWithAttachments();
+      await dbSetMeta('lastExport', { timestamp: Date.now() });
+      refreshBackupBanner();
+      toast('Excel + attachments downloaded');
+    }catch(e){
+      toast('⚠ Excel export failed');
     }
   });
 
@@ -869,4 +1010,5 @@ function bindEvents(){
 /* ============================= BOOT ============================= */
 initSelects();
 bindEvents();
+requestPersistentStorage();
 initSecurity();

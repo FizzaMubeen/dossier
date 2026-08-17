@@ -32,6 +32,7 @@
     </div>
     <div class="stats" id="stats"></div>
   </header>
+  <p class="storage-info" id="storageInfo"></p>
 
   <div class="toolbar">
     <input type="text" id="search" placeholder="Search company, position, tag…">
@@ -43,13 +44,15 @@
       <option value="company">Sort: company A–Z</option>
     </select>
     <button class="btn secondary" id="bulkImportBtn">Bulk import</button>
-    <button class="btn secondary" id="exportBtn">Export backup</button>
+    <button class="btn secondary" id="exportBtn">Export backup (JSON)</button>
+    <button class="btn secondary" id="exportExcelBtn">Export Excel + files (.zip)</button>
     <button class="btn secondary" id="importBtn">Import backup</button>
     <input type="file" id="importFile" accept="application/json" style="display:none;">
     <button class="btn secondary" id="securityBtn">🔒 Security</button>
     <button class="btn" id="newBtn">+ New Entry</button>
   </div>
 
+  <div id="backupBanner"></div>
   <div id="gridWrap"></div>
 </div>
 
